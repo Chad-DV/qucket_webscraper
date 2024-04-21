@@ -1,12 +1,25 @@
 import os
+import sys
 import csv
 import json
+import logging
+import requests
 from datetime import datetime
 from bs4 import BeautifulSoup
 from requests_html import HTMLSession
 
-events = []
-session = HTMLSession()
+ROOT_DIR =os.path.dirname(__file__)
+EVENTS_FILE_PATH = os.path.join(ROOT_DIR, 'events.csv')
+QUICKET_URL = "https://www.quicket.co.za/events/"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(os.path.join(ROOT_DIR, "error.log"))
+    ]
+)
 
 def iso_8601_to_standard_date_time(datetime_str):
     """
@@ -18,80 +31,84 @@ def iso_8601_to_standard_date_time(datetime_str):
         time = datetime_obj.strftime("%H:%M:%S")
         return date, time
     except ValueError as e:
-        print(f"Error: {e}")
+        logging.error(f"Error converting ISO 8601 datetime: {e}")
         return None, None
     
 def get_location_information(location):
-    location_type = location.get('@type')
-    if location_type.lower() == 'place':    
+    location_type = location.get('@type', '').lower()
+    if location_type == 'place':
         address = location.get('address')
-        street_address = address.get('streetAddress').replace(', ','_')
-        return  location.get('name') if street_address == ''  else street_address 
-    elif location_type.lower() == 'virtuallocation':
+        street_address = address.get('streetAddress', '').replace(',', '_')
+        clean_streetaddress = street_address.replace('"','').replace(',', '_')
+        return location.get('name') if street_address == '' else clean_streetaddress
+    elif location_type == 'virtuallocation':
         return location.get('url')
-    
+    else:
+        logging.error(f"Unknown location type: {location_type}")
+        return None
+
 def write_to_csv(events_list):
     """
-    wirtes a list of dictionaries to .csv file in the same directory as this script
+    Writes a list of dictionaries to a .csv file in the same directory as this script.
     """
-    dir_path = os.path.dirname(os.path.realpath(__file__))
-    csv_path = os.path.join(dir_path,'events.csv')
-    fieldnames = events_list[0].keys()
+    try:
+        fieldnames = events_list[0].keys()
+        with open(EVENTS_FILE_PATH, 'w', newline='') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(events_list)
 
-    # Open CSV file in write mode
-    with open(csv_path, 'w', newline='') as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        print("CSV file has been created successfully.")
+    except IndexError as e:
+        logging.error(f"Error events list empty: {e}")
+    except Exception as e:
+        logging.error(f"Error writing to CSV file: {e}")
 
-        # Write header
-        writer.writeheader()
 
-        # Write data
-        for event in events_list:
-            writer.writerow(event)
-
-    print("CSV file has been created successfully.")
-
-def current_time()->str:
+def get_html_data(url, page_number):
     """
-    Returns the current time as string
+    Fetches HTML data from a website and appends it to a list.
     """
-    now  = str(datetime.today())
-    date = now.split(' ')[0]
-    time = str(now.split(' ')[1].split('.')[0])
-    return f'{date}_{time}'
-
-
-def get_html_data(url,page_number):
-    """
-    Fetches HTML data from website & appends to a list
-    """
-    if page_number>10:
+    if page_number > 10:
         return
     
-    print("Fetching content from page: ", page_number)
     page_url = f"{url}{page_number}/"
-    response = session.get(page_url)
-    response.html.render()
+    try:
+        response = session.get(page_url)
+        response.html.render()
 
-    soup = BeautifulSoup(response.html.html,'html.parser')
-    script_tag = soup.find('script', type='application/ld+json')
+        if response.status_code != 200:
+            logging.error(f"Failed to fetch content from {page_url}. Status code: {response.status_code}")
+            return
 
-    json_data = script_tag.string
-    event_data = json.loads(json_data)
+        soup = BeautifulSoup(response.html.html, 'html.parser')
+        script_tag = soup.find('script', type='application/ld+json')
 
-    for item in event_data:
-        date, time = iso_8601_to_standard_date_time(item.get('startDate'))
-        event = {
-            "Title":item.get('name').replace(', 'and' ','_'),
-            "Location":get_location_information(item.get('location')),
-            "Date":date,
-            "Time":time
-        }
-        events.append(event)
-    page_number += 1
-    get_html_data(url,page_number)
+        if script_tag:
+            json_data = script_tag.string
+            event_data = json.loads(json_data)
 
-url = "https://www.quicket.co.za/events/"
+            for item in event_data:
+                date, time = iso_8601_to_standard_date_time(item.get('startDate'))
+                event = {
+                    "Title": item.get('name', '').replace(',', ' and').replace(' ', '_'),
+                    "Location": get_location_information(item.get('location', {})),
+                    "Date": date,
+                    "Time": time
+                }
+                events.append(event)
 
-get_html_data(url,1)
-write_to_csv(events)    
+        get_html_data(url, page_number + 1)
+
+    except requests.RequestException as e:
+        logging.error(f"Error fetching content from {page_url}: {e}")
+    except Exception as e:
+        logging.error(f"Error processing content from {page_url}: {e}")
+
+if __name__ == "__main__":
+    session = HTMLSession()
+    events = []
+
+    get_html_data(QUICKET_URL, 1)
+    if events:
+        write_to_csv(events)

@@ -8,6 +8,12 @@
 .vscode/
 .devcontainer/
 
+# Data files
+*.csv
+
+# Ignore pytest cache
+.pytest_cache/
+
 # Dependency directories
 __pycache__/
 env/
